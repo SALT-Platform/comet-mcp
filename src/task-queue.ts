@@ -26,7 +26,16 @@ export class TaskQueue {
     const pending = this.queues.get(tabId);
     if (!pending || pending.length === 0) return null;
 
-    const task = pending.shift()!;
+    let task: TaskDelegation | undefined;
+    while (pending.length > 0) {
+      const candidate = pending.shift()!;
+      if (candidate.state === "pending") {
+        task = candidate;
+        break;
+      }
+    }
+    if (!task) return null;
+
     task.state = "running";
     task.startedAt = Date.now();
     this.activeTasks.set(tabId, task);
@@ -36,8 +45,10 @@ export class TaskQueue {
   completeActive(tabId: string): void {
     const active = this.activeTasks.get(tabId);
     if (active) {
-      active.state = "completed";
-      active.completedAt = Date.now();
+      if (active.state === "running" || active.state === "pending") {
+        active.state = "completed";
+      }
+      active.completedAt ??= Date.now();
       this.activeTasks.delete(tabId);
     }
   }

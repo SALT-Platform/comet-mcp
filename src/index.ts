@@ -403,6 +403,7 @@ async function handleToolCall(
         if (!task) {
           return { content: [{ type: "text", text: `No task found with ID: ${taskId}` }] };
         }
+        const result = orchestrator.getTaskResult(taskId);
         let output = `Task ${task.id}\n`;
         output += `State: ${task.state.toUpperCase()}\n`;
         output += `Steps: ${task.currentStepIndex}/${task.steps.length}\n`;
@@ -413,6 +414,9 @@ async function handleToolCall(
         for (const step of task.steps) {
           const icon = step.status === "completed" ? "✓" : step.status === "running" ? "…" : step.status === "failed" ? "✗" : "·";
           output += `  ${icon} ${step.toolName} [${step.status}]${step.duration_ms != null ? ` ${step.duration_ms}ms` : ""}\n`;
+        }
+        if (result) {
+          output += `Result: ${result.status.toUpperCase()} (${result.steps_completed}/${result.steps_total})\n`;
         }
         return { content: [{ type: "text", text: output }] };
       }

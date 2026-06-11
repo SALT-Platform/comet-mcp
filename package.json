@@ -20,6 +20,7 @@
     "http": "node dist/http-server.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:ci": "vitest run tests/unit/ tests/contract/health.test.ts tests/contract/delegate.test.ts tests/contract/monitor.test.ts tests/contract/poll-extended.test.ts tests/contract/stop-extended.test.ts",
     "test:contract": "vitest run tests/contract/",
     "test:unit": "vitest run tests/unit/",
     "test:integration": "vitest run tests/integration/",
@@ -58,6 +59,7 @@
   "devDependencies": {
     "@types/chrome-remote-interface": "^0.31.14",
     "@types/node": "^20.10.0",
+    "@vitest/coverage-v8": "^4.0.18",
     "typescript": "^5.3.0",
     "vitest": "^4.0.18"
   }

@@ -11,6 +11,17 @@
 import CDP from "chrome-remote-interface";
 import type { DormancyManager } from "./dormancy.js";
 
+const BRIDGE_DETECTION_EXPR = `
+(() => {
+  const manifest = chrome?.runtime?.getManifest?.() ?? {};
+  const permissions = manifest.permissions ?? [];
+  const name = String(manifest.name ?? "");
+  return self.__COMET_TAB_GROUPS_BRIDGE__ === true ||
+    ((name === "Comet Tab Groups Bridge" || name === "comet-agent") &&
+      permissions.includes("tabGroups"));
+})()
+`;
+
 // ---- Types ----
 
 export type TabGroupColor =
@@ -133,7 +144,7 @@ export class TabGroupsClient {
         await testClient.Runtime.enable();
 
         const result = await testClient.Runtime.evaluate({
-          expression: "self.__COMET_TAB_GROUPS_BRIDGE__ === true",
+          expression: BRIDGE_DETECTION_EXPR,
           returnByValue: true,
         });
 
@@ -186,7 +197,7 @@ export class TabGroupsClient {
     try {
       const result = await Promise.race([
         this.client.Runtime.evaluate({
-          expression: "self.__COMET_TAB_GROUPS_BRIDGE__",
+          expression: BRIDGE_DETECTION_EXPR,
           returnByValue: true,
         }),
         new Promise<never>((_, reject) =>

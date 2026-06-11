@@ -17,7 +17,7 @@ async function apiPost(path: string, body: Record<string, unknown> = {}): Promis
 }
 
 describe("orchestrator integration (requires running comet-mcp on port 3456)", () => {
-  it("health check returns structured result with 4 components", async () => {
+  it("health check returns structured result with canonical components and aliases", async () => {
     const { body } = await apiGet("/api/health");
     expect(body).toHaveProperty("overall");
     expect(body).toHaveProperty("components");
@@ -25,8 +25,13 @@ describe("orchestrator integration (requires running comet-mcp on port 3456)", (
     expect(body).toHaveProperty("duration_ms");
     expect(typeof body.overall).toBe("string");
     expect(["healthy", "degraded", "down"]).toContain(body.overall);
-    const componentNames = Object.keys(body.components).sort();
-    expect(componentNames).toEqual(["browser", "comet-mcp", "comet-monitor", "extension"]);
+    expect(body.components).toHaveProperty("browser");
+    expect(body.components).toHaveProperty("comet-mcp");
+    expect(body.components).toHaveProperty("comet-monitor");
+    expect(body.components).toHaveProperty("extension");
+    expect(body.components).toHaveProperty("browser_cdp");
+    expect(body.components).toHaveProperty("comet_mcp");
+    expect(body.components).toHaveProperty("comet_monitor");
   });
 
   it("simple delegation routes to correct tool and returns TaskResult", async () => {

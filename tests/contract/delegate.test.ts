@@ -4,6 +4,9 @@ const API_BASE = process.env.COMET_API_URL || "http://127.0.0.1:3456";
 
 interface DelegateInput {
   description: string;
+  surface?: "computer" | "space" | "sidecar" | "browser" | "shortwave";
+  space_id?: string;
+  group_id?: number;
   target_tab?: string;
   timeout_ms?: number;
   async?: boolean;
@@ -63,6 +66,14 @@ async function callDelegateTool(input: DelegateInput): Promise<DelegateOutput> {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   return res.json() as Promise<DelegateOutput>;
+}
+
+async function callDelegateRaw(input: Record<string, unknown>): Promise<Response> {
+  return fetch(new URL("/api/delegate", API_BASE).toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
 }
 
 describe("comet_delegate contract", () => {
@@ -177,5 +188,44 @@ describe("comet_delegate contract", () => {
     expect(typeof output.error!.code).toBe("string");
     expect(typeof output.error!.message).toBe("string");
     expect(typeof output.error!.recoverable).toBe("boolean");
+  });
+
+  it("rejects unknown surface values", async () => {
+    const res = await callDelegateRaw({
+      description: "contract validator",
+      surface: "unknown",
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("surface must be one of");
+  });
+
+  it("routes explicit computer surface into a coordination task", async () => {
+    const res = await callDelegateRaw({
+      description: "contract validator computer delegation",
+      surface: "computer",
+      task_kind: "validation",
+      async: true,
+    });
+    const payload = await res.json();
+
+    expect(res.status).toBe(202);
+    expect(payload.surface).toBe("computer");
+    expect(payload.task_id).toBeTruthy();
+    expect(payload.state).toBe("dispatched");
+  });
+
+  it("emits sidecar deprecation hint while preserving compatibility", async () => {
+    const res = await callDelegateRaw({
+      description: "contract validator sidecar delegation",
+      surface: "sidecar",
+      task_kind: "validation",
+    });
+    const payload = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Deprecation")).toBe("true");
+    expect(payload.surface).toBe("sidecar");
+    expect(payload.migration_hint).toContain("surface=computer");
   });
 });
