@@ -3,6 +3,8 @@ dist/
 *.log
 .DS_Store
 demo-clear.gif
+coverage/
+test-results.xml
 
 # Local dev notes
 DEBUG_MEMORY.md

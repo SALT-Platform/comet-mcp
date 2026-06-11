@@ -627,10 +627,21 @@ async function handleMode(res: ServerResponse, body: Record<string, unknown>) {
 // ---- Tab Group route handlers ----
 
 async function handleTabGroupsList(res: ServerResponse) {
-  const result = await (async () => {
-    return { groups: await tabGroupsClient.listGroups() };
-  })();
-  json(res, result);
+  try {
+    const groups = await Promise.race([
+      tabGroupsClient.listGroups(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("tab groups list timeout")), 10_000)
+      ),
+    ]);
+    json(res, { groups });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    json(res, {
+      groups: [],
+      unavailable_reason: message,
+    });
+  }
 }
 
 async function handleTabGroupsListTabs(res: ServerResponse) {
