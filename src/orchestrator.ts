@@ -54,6 +54,7 @@ interface ICometOrchestrator {
   ): Promise<TaskResult>;
   getMonitorState(section?: "windows" | "tabs" | "all"): Promise<MonitorState>;
   getTaskStatus(taskId: string): TaskDelegation | null;
+  getTaskResult(taskId: string): TaskResult | null;
   cancelTask(taskId: string): boolean;
 }
 
@@ -147,6 +148,13 @@ export class CometOrchestrator implements ICometOrchestrator {
 
   private ready = false;
   private cometMutex = new AsyncMutex();
+  private taskTemplates = new Map<string, TaskTemplate>();
+  private taskResults = new Map<string, TaskResult>();
+  private taskCompletions = new Map<
+    string,
+    { resolve: (result: TaskResult) => void; reject: (error: unknown) => void }
+  >();
+  private activeWorkers = new Set<string>();
 
   constructor(deps: OrchestratorDeps) {
     this.toolRouter = deps.toolRouter;
@@ -208,10 +216,16 @@ export class CometOrchestrator implements ICometOrchestrator {
     };
 
     this.taskQueue.enqueue(task);
+    this.taskTemplates.set(task.id, template);
+
+    const completion = new Promise<TaskResult>((resolve, reject) => {
+      this.taskCompletions.set(task.id, { resolve, reject });
+    });
+    this.startQueueWorker(this.taskKey(task));
 
     if (options?.async) {
       return {
-        status: "pending" as TaskResult["status"],
+        status: "pending",
         payload: { taskId: task.id },
         duration_ms: 0,
         tools_invoked: [],
@@ -220,7 +234,7 @@ export class CometOrchestrator implements ICometOrchestrator {
       };
     }
 
-    return this.executeTask(task, template);
+    return completion;
   }
 
   getMonitorState(section?: "windows" | "tabs" | "all"): Promise<MonitorState> {
@@ -231,11 +245,95 @@ export class CometOrchestrator implements ICometOrchestrator {
     return this.taskQueue.getTask(taskId);
   }
 
+  getTaskResult(taskId: string): TaskResult | null {
+    return this.taskResults.get(taskId) ?? null;
+  }
+
   cancelTask(taskId: string): boolean {
-    return this.taskQueue.cancel(taskId);
+    const task = this.taskQueue.getTask(taskId);
+    const cancelled = this.taskQueue.cancel(taskId);
+    if (cancelled && task) {
+      const result = this.cancelledResult(task);
+      this.taskResults.set(taskId, result);
+      const completion = this.taskCompletions.get(taskId);
+      if (completion) {
+        completion.resolve(result);
+        this.taskCompletions.delete(taskId);
+      }
+    }
+    return cancelled;
   }
 
   // ── Private ──────────────────────────────────────────────────────
+
+  private taskKey(task: TaskDelegation): string {
+    return task.targetTabId ?? "__global__";
+  }
+
+  private startQueueWorker(tabKey: string): void {
+    if (this.activeWorkers.has(tabKey)) return;
+    this.activeWorkers.add(tabKey);
+    void this.runQueueWorker(tabKey);
+  }
+
+  private async runQueueWorker(tabKey: string): Promise<void> {
+    try {
+      while (true) {
+        const task = this.taskQueue.dequeue(tabKey);
+        if (!task) return;
+
+        const template = this.taskTemplates.get(task.id);
+        if (!template) {
+          const result = failureResult("MISSING_TEMPLATE", `Template missing for task ${task.id}`);
+          task.state = "failed";
+          task.completedAt = Date.now();
+          this.taskQueue.completeActive(tabKey);
+          this.resolveTask(task.id, result);
+          continue;
+        }
+
+        const result = await this.executeTask(task, template);
+        this.resolveTask(task.id, result);
+      }
+    } finally {
+      this.activeWorkers.delete(tabKey);
+      if (this.taskQueue.getQueueDepth(tabKey) > 0) {
+        this.startQueueWorker(tabKey);
+      }
+    }
+  }
+
+  private resolveTask(taskId: string, result: TaskResult): void {
+    this.taskResults.set(taskId, result);
+    this.taskTemplates.delete(taskId);
+    const completion = this.taskCompletions.get(taskId);
+    if (completion) {
+      completion.resolve(result);
+      this.taskCompletions.delete(taskId);
+    }
+  }
+
+  private cancelledResult(task: TaskDelegation): TaskResult {
+    const startedAt = task.startedAt ?? Date.now();
+    const completedAt = task.completedAt ?? Date.now();
+    return {
+      status: "cancelled",
+      payload: null,
+      duration_ms: completedAt - startedAt,
+      tools_invoked: task.steps
+        .filter((step) => step.status === "completed" || step.status === "skipped")
+        .map((step) => step.toolName),
+      steps_completed: task.steps.filter(
+        (step) => step.status === "completed" || step.status === "skipped",
+      ).length,
+      steps_total: task.steps.length,
+      error: {
+        code: "CANCELLED",
+        message: `Task ${task.id} was cancelled`,
+        recoverable: false,
+      },
+    };
+  }
 
   private async buildEnrichmentFallback(description: string): Promise<TaskResult> {
     const templates = this.templateRegistry.getAll();
@@ -289,15 +387,22 @@ export class CometOrchestrator implements ICometOrchestrator {
   }
 
   private async executeTask(task: TaskDelegation, template: TaskTemplate): Promise<TaskResult> {
+    if (task.state === "cancelled") return this.cancelledResult(task);
     task.state = "running";
-    task.startedAt = Date.now();
+    task.startedAt ??= Date.now();
 
     const toolsInvoked: string[] = [];
     let lastResult: unknown = null;
     const deadline = task.startedAt + task.timeout_ms;
-    const tabKey = task.targetTabId ?? "__global__";
+    const tabKey = this.taskKey(task);
 
     for (let i = 0; i < task.steps.length; i++) {
+      if ((task as TaskDelegation).state === "cancelled") {
+        task.completedAt = Date.now();
+        this.taskQueue.completeActive(tabKey);
+        return this.cancelledResult(task);
+      }
+
       if (Date.now() >= deadline) {
         task.state = "failed";
         task.completedAt = Date.now();

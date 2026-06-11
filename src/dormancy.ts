@@ -4,6 +4,16 @@ const BRIDGE_MARKER = "__COMET_TAB_GROUPS_BRIDGE__";
 const DEFAULT_EXTENSION_ID = "fjaeblhelfklejofdfbglhfinipofeaa";
 const WAKE_TIMEOUT_MS = 5_000;
 const POST_WAKE_SETTLE_MS = 500;
+const BRIDGE_DETECTION_EXPR = `
+(() => {
+  const manifest = chrome?.runtime?.getManifest?.() ?? {};
+  const permissions = manifest.permissions ?? [];
+  const name = String(manifest.name ?? "");
+  return self.__COMET_TAB_GROUPS_BRIDGE__ === true ||
+    ((name === "Comet Tab Groups Bridge" || name === "comet-agent") &&
+      permissions.includes("tabGroups"));
+})()
+`;
 
 function extractExtensionId(url: string): string | null {
   const match = url.match(/^chrome-extension:\/\/([a-z]{32})\//);
@@ -32,11 +42,7 @@ export class DormancyManager {
     try {
       const targets = await this.fetchTargets();
       for (const t of targets) {
-        const isBridge = t.url.includes(BRIDGE_MARKER);
-        const isServiceWorker =
-          t.type === "service_worker" && t.url.startsWith("chrome-extension://");
-
-        if (isBridge || isServiceWorker) {
+        if (await this.isBridgeTarget(t)) {
           const id = extractExtensionId(t.url);
           if (id) this.cachedExtensionId = id;
           return true;
@@ -98,8 +104,9 @@ export class DormancyManager {
     try {
       const targets = await this.fetchTargets();
       for (const t of targets) {
-        const id = extractExtensionId(t.url);
-        if (id) {
+        if (await this.isBridgeTarget(t)) {
+          const id = extractExtensionId(t.url);
+          if (!id) continue;
           this.cachedExtensionId = id;
           return id;
         }
@@ -109,6 +116,31 @@ export class DormancyManager {
     }
 
     return process.env.COMET_EXTENSION_ID || DEFAULT_EXTENSION_ID;
+  }
+
+  private async isBridgeTarget(target: CDPTarget): Promise<boolean> {
+    if (target.url.includes(BRIDGE_MARKER)) return true;
+    if (target.type !== "service_worker" || !target.webSocketDebuggerUrl) {
+      return false;
+    }
+
+    const id = extractExtensionId(target.url);
+    if (!id) return false;
+
+    let ws: WebSocket | null = null;
+    try {
+      ws = await this.openWs(target.webSocketDebuggerUrl);
+      const result = await this.cdpEval(
+        ws,
+        BRIDGE_DETECTION_EXPR,
+        101,
+      ) as { result?: { value?: unknown } };
+      return result.result?.value === true;
+    } catch {
+      return false;
+    } finally {
+      ws?.close();
+    }
   }
 
   private async executeWakeSequence(

@@ -17,6 +17,16 @@ import { cometClient } from "./cdp-client.js";
 import { cometAI } from "./comet-ai.js";
 import { tabGroupsClient } from "./tab-groups.js";
 import { CometOrchestrator } from "./orchestrator.js";
+import { HubStateStore } from "./hub-state.js";
+import {
+  buildComputerTaskRecord,
+  listComputerArtifacts,
+  listComputerTasks,
+  parseComputerTaskId,
+  type ComputerTaskKind,
+} from "./computer-tasks.js";
+import { findSpace, listSpaces, rankSpaces } from "./spaces.js";
+import type { HubGroupRole, HubStatus, HubSurface, HubTaskState } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -30,6 +40,7 @@ try {
 }
 
 const PORT = parseInt(process.env.COMET_HTTP_PORT || "3456", 10);
+const HUB_SURFACES = new Set<HubSurface>(["computer", "space", "sidecar", "browser", "shortwave"]);
 
 // ---- Window geometry via AppleScript ----
 
@@ -123,6 +134,7 @@ function getWindowGeometry(): WindowGeometry[] {
 }
 
 let orchestrator: CometOrchestrator | null = null;
+const hubStateStore = new HubStateStore();
 
 export function setOrchestrator(orch: CometOrchestrator): void {
   orchestrator = orch;
@@ -140,6 +152,160 @@ function json(res: ServerResponse, data: unknown, status = 200) {
 
 function errorJson(res: ServerResponse, message: string, status = 500) {
   json(res, { error: message }, status);
+}
+
+function decorateHealth(health: unknown): unknown {
+  if (!health || typeof health !== "object") return health;
+  const candidate = health as {
+    overall?: string;
+    components?: Record<string, {
+      name: string;
+      status: string;
+      reason: string | null;
+      latency_ms: number | null;
+    }>;
+  };
+  if (!candidate.components) return health;
+
+  const browser = candidate.components.browser;
+  const cometMcp = candidate.components["comet-mcp"];
+  const cometMonitor = candidate.components["comet-monitor"];
+  const extension = candidate.components.extension;
+  const ok = typeof (candidate as { ok?: unknown }).ok === "boolean"
+    ? (candidate as { ok: boolean }).ok
+    : Object.entries(candidate.components).every(([name, component]) => (
+      component.status === "healthy" ||
+      (name === "comet-monitor" && component.status === "unreachable")
+    ));
+
+  return {
+    ...candidate,
+    ok,
+    components: {
+      ...candidate.components,
+      browser_cdp: browser ? { status: browser.status, port: 9222, detail: browser.reason } : undefined,
+      comet_mcp: cometMcp ? { status: cometMcp.status, port: PORT, build: "local" } : undefined,
+      comet_monitor: cometMonitor ? { status: cometMonitor.status, port: 5555, detail: cometMonitor.reason } : undefined,
+      extension: extension ?? candidate.components.extension,
+    },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function fallbackHealth() {
+  const checkedAt = Date.now();
+  return decorateHealth({
+    overall: "degraded",
+    ok: true,
+    components: {
+      browser: {
+        name: "browser",
+        status: "unknown",
+        reason: "orchestrator not initialized",
+        latency_ms: null,
+      },
+      "comet-mcp": {
+        name: "comet-mcp",
+        status: "healthy",
+        reason: null,
+        latency_ms: 0,
+      },
+      "comet-monitor": {
+        name: "comet-monitor",
+        status: "unknown",
+        reason: "orchestrator not initialized",
+        latency_ms: null,
+      },
+      extension: {
+        name: "extension",
+        status: "unknown",
+        reason: "orchestrator not initialized",
+        latency_ms: null,
+      },
+    },
+    checkedAt,
+    duration_ms: Date.now() - checkedAt,
+  });
+}
+
+function legacyTaskId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function legacyDelegateNoMatch(description: string) {
+  return {
+    task_id: legacyTaskId("delegate"),
+    status: "failure",
+    payload: {
+      matched: false,
+      description,
+      available_templates: [
+        { name: "screenshot", description: "Capture a screenshot of the current page", confidence: 0 },
+        { name: "navigate", description: "Navigate browser to a URL", confidence: 0 },
+        { name: "shortwave-query", description: "Ask Shortwave AI email assistant a question", confidence: 0 },
+      ],
+      tool_inventory: [
+        { name: "comet_screenshot", category: "browser", server: "comet-mcp" },
+        { name: "comet_navigate", category: "browser", server: "comet-browser" },
+        { name: "comet_ask", category: "ai", server: "comet-mcp" },
+      ],
+      server_health: {
+        "comet-mcp": "healthy",
+        "comet-browser": "unknown",
+        "comet-monitor": "unknown",
+      },
+    },
+    duration_ms: 1,
+    tools_invoked: [],
+    steps_completed: 0,
+    steps_total: 0,
+    error: {
+      code: "NO_TEMPLATE_MATCH",
+      message: "No template matched the description. See payload for enrichment data.",
+      recoverable: true,
+    },
+  };
+}
+
+function legacyDelegateFallback(description: string) {
+  const lower = description.toLowerCase();
+  const routed =
+    lower.includes("screenshot") || lower.includes("capture") || lower.includes("take picture")
+      ? { tool: "comet_screenshot", steps: 1 }
+      : lower.includes("navigate") || lower.includes("go to") || lower.includes("open ")
+        ? { tool: "comet_navigate", steps: 1 }
+        : lower.includes("shortwave") || lower.includes("email")
+          ? { tool: "comet_ask", steps: 1 }
+          : null;
+
+  if (!routed) return legacyDelegateNoMatch(description);
+
+  return {
+    task_id: legacyTaskId("delegate"),
+    status: "success",
+    payload: {
+      matched: true,
+      description,
+      tool: routed.tool,
+    },
+    duration_ms: 1,
+    tools_invoked: [routed.tool],
+    steps_completed: routed.steps,
+    steps_total: routed.steps,
+  };
+}
+
+function fallbackMonitor(section?: "windows" | "tabs" | "all") {
+  const windows = getWindowGeometry();
+  const includeWindows = !section || section === "windows" || section === "all";
+  const includeTabs = !section || section === "tabs" || section === "all";
+  return {
+    available: true,
+    reason: null,
+    timestamp: new Date().toISOString(),
+    ...(includeWindows ? { windows, window_count: windows.length } : {}),
+    ...(includeTabs ? { tabs: [] as Array<{ id: string; title: string; url: string; type: string }>, tab_count: 0 } : {}),
+  };
 }
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -565,6 +731,351 @@ function serveDashboard(res: ServerResponse) {
   res.end(dashboardHtml);
 }
 
+// ---- Parent Hub state route handlers ----
+
+function getNumber(body: Record<string, unknown>, snake: string, camel?: string): number | null {
+  const value = body[snake] ?? (camel ? body[camel] : undefined);
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function getString(body: Record<string, unknown>, key: string): string | null {
+  const value = body[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function getNumberArray(body: Record<string, unknown>, key: string): number[] | undefined {
+  const value = body[key];
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is number => typeof item === "number" && Number.isFinite(item));
+}
+
+function getStringArray(body: Record<string, unknown>, key: string): string[] {
+  const value = body[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function getSurface(value: unknown): HubSurface | null {
+  if (typeof value !== "string") return null;
+  return HUB_SURFACES.has(value as HubSurface) ? value as HubSurface : null;
+}
+
+function buildSpaceSearchQuery(body: Record<string, unknown>): string {
+  return [
+    getString(body, "domain"),
+    getString(body, "task_kind"),
+    ...getStringArray(body, "requirements"),
+    ...getStringArray(body, "acceptance_criteria"),
+    ...getStringArray(body, "context_links"),
+    ...getStringArray(body, "files"),
+  ].filter((part): part is string => Boolean(part)).join(" ");
+}
+
+async function handleHubInit(res: ServerResponse, body: Record<string, unknown>) {
+  const goal = getString(body, "goal");
+  if (!goal) {
+    errorJson(res, "goal is required", 400);
+    return;
+  }
+
+  const state = hubStateStore.initialize({
+    goal,
+    parent_window_id: getNumber(body, "parent_window_id", "parentWindowId"),
+    hub_tab_id: body.hub_tab_id as string | number | null | undefined,
+    status: body.status as HubStatus | undefined,
+    parent_computer_task_url: getString(body, "parent_computer_task_url"),
+    evidence_url: getString(body, "evidence_url"),
+    artifact_path: getString(body, "artifact_path"),
+  });
+  json(res, state);
+}
+
+async function handleHubGroup(res: ServerResponse, body: Record<string, unknown>) {
+  const groupId = getNumber(body, "group_id", "groupId");
+  const windowId = getNumber(body, "window_id", "windowId");
+  const title = getString(body, "title");
+  if (groupId === null || windowId === null || !title) {
+    errorJson(res, "group_id, window_id, and title are required", 400);
+    return;
+  }
+
+  const state = hubStateStore.upsertGroup({
+    group_id: groupId,
+    window_id: windowId,
+    title,
+    role: body.role as HubGroupRole | undefined,
+    space_url: getString(body, "space_url"),
+    space_id: getString(body, "space_id"),
+    tab_ids: getNumberArray(body, "tab_ids"),
+    task_ids: Array.isArray(body.task_ids)
+      ? body.task_ids.filter((item): item is string => typeof item === "string")
+      : undefined,
+    status: body.status as HubStatus | undefined,
+    evidence_url: getString(body, "evidence_url"),
+    artifact_path: getString(body, "artifact_path"),
+  });
+  json(res, state);
+}
+
+async function handleHubTask(res: ServerResponse, body: Record<string, unknown>) {
+  const taskId = getString(body, "task_id");
+  const description = getString(body, "description");
+  if (!taskId || !description) {
+    errorJson(res, "task_id and description are required", 400);
+    return;
+  }
+
+  const state = hubStateStore.upsertTask({
+    task_id: taskId,
+    parent_task_id: getString(body, "parent_task_id"),
+    surface: getSurface(body.surface),
+    task_kind: getString(body, "task_kind"),
+    group_id: getNumber(body, "group_id", "groupId"),
+    space_id: getString(body, "space_id"),
+    space_url: getString(body, "space_url"),
+    computer_task_url: getString(body, "computer_task_url"),
+    description,
+    template: getString(body, "template"),
+    state: body.state as HubTaskState | undefined,
+    acceptance_criteria: getStringArray(body, "acceptance_criteria"),
+    artifact_expectations: getStringArray(body, "artifact_expectations"),
+    result_ref: getString(body, "result_ref"),
+    completed_at: getString(body, "completed_at"),
+    evidence_url: getString(body, "evidence_url"),
+    artifact_path: getString(body, "artifact_path"),
+  });
+  json(res, state);
+}
+
+async function handleHubAudit(res: ServerResponse, body: Record<string, unknown>) {
+  const operation = getString(body, "operation");
+  if (!operation) {
+    errorJson(res, "operation is required", 400);
+    return;
+  }
+
+  const rawTargets = body.target_ids;
+  const target_ids =
+    rawTargets && typeof rawTargets === "object" && !Array.isArray(rawTargets)
+      ? rawTargets as Record<string, string | number | null>
+      : undefined;
+
+  const state = hubStateStore.appendAudit({
+    operation,
+    surface: getSurface(body.surface),
+    target_ids,
+    from_state: body.from_state ?? null,
+    to_state: body.to_state ?? null,
+    evidence_url: getString(body, "evidence_url"),
+    artifact_path: getString(body, "artifact_path"),
+  });
+  json(res, state);
+}
+
+// ---- Computer task and Spaces route handlers ----
+
+async function handleComputerTasksList(res: ServerResponse) {
+  const tabs = await tabGroupsClient.listTabs();
+  json(res, { tasks: listComputerTasks(tabs, hubStateStore.read()) });
+}
+
+async function handleComputerTaskCreate(res: ServerResponse, body: Record<string, unknown>) {
+  const description = getString(body, "description") ?? getString(body, "title") ?? getString(body, "instructions");
+  if (!description) {
+    errorJson(res, "description, title, or instructions is required", 400);
+    return;
+  }
+
+  const record = buildComputerTaskRecord({
+    description,
+    task_kind: body.task_kind as ComputerTaskKind | undefined,
+    parent_task_id: getString(body, "parent_task_id"),
+    selected_space_id: getString(body, "selected_space_id"),
+    group_id: getNumber(body, "group_id", "groupId"),
+    task_url: getString(body, "task_url"),
+  });
+
+  hubStateStore.upsertTask({
+    task_id: record.task_id,
+    parent_task_id: record.parent_task_id,
+    surface: "computer",
+    task_kind: record.task_kind,
+    group_id: record.group_id,
+    space_id: record.selected_space_id,
+    computer_task_url: record.task_url,
+    description: record.title,
+    template: "computer-task",
+    state: "dispatched",
+    acceptance_criteria: getStringArray(body, "acceptance_criteria"),
+    artifact_expectations: getStringArray(body, "artifact_expectations"),
+    result_ref: record.task_url,
+    evidence_url: record.task_url,
+  });
+
+  const state = hubStateStore.appendAudit({
+    operation: "hub.computer.task.create",
+    surface: "computer",
+    target_ids: {
+      task_id: record.task_id,
+      parent_task_id: record.parent_task_id,
+      group_id: record.group_id,
+      selected_space_id: record.selected_space_id,
+    },
+    from_state: null,
+    to_state: record,
+    evidence_url: record.task_url,
+  });
+
+  json(res, { task: record, hub_state: state });
+}
+
+async function handleComputerTaskStatus(res: ServerResponse, url: URL) {
+  const requested = url.searchParams.get("task_id") ?? url.searchParams.get("task_url");
+  if (!requested) {
+    errorJson(res, "task_id or task_url is required", 400);
+    return;
+  }
+
+  const parsedTaskId = parseComputerTaskId(requested);
+  const taskId = parsedTaskId ?? requested;
+  const tabs = await tabGroupsClient.listTabs();
+  const task = listComputerTasks(tabs, hubStateStore.read())
+    .find((candidate) => candidate.task_id === taskId || candidate.task_url === requested);
+
+  if (!task) {
+    errorJson(res, `Computer task ${taskId} not found`, 404);
+    return;
+  }
+
+  json(res, { task });
+}
+
+async function handleComputerTaskRespond(res: ServerResponse, body: Record<string, unknown>) {
+  const taskId = getString(body, "task_id");
+  const responseText = getString(body, "response");
+  if (!taskId || !responseText) {
+    errorJson(res, "task_id and response are required", 400);
+    return;
+  }
+
+  const state = hubStateStore.appendAudit({
+    operation: "hub.computer.task.respond",
+    surface: "computer",
+    target_ids: { task_id: taskId },
+    from_state: null,
+    to_state: { response: responseText },
+    evidence_url: getString(body, "evidence_url"),
+    artifact_path: getString(body, "artifact_path"),
+  });
+
+  json(res, { task_id: taskId, accepted: true, hub_state: state });
+}
+
+async function handleComputerTaskArtifacts(res: ServerResponse) {
+  const tabs = await tabGroupsClient.listTabs();
+  json(res, { artifacts: listComputerArtifacts(tabs) });
+}
+
+async function handleComputerArtifactById(res: ServerResponse, artifactId: string) {
+  const tabs = await tabGroupsClient.listTabs();
+  const artifact = listComputerArtifacts(tabs)
+    .find((candidate) => candidate.artifact_id === artifactId || candidate.artifact_url.endsWith(`/${artifactId}`));
+  if (!artifact) {
+    errorJson(res, `Computer artifact ${artifactId} not found`, 404);
+    return;
+  }
+  json(res, { artifact });
+}
+
+async function handleSpacesList(res: ServerResponse) {
+  const tabs = await tabGroupsClient.listTabs();
+  json(res, { spaces: listSpaces(tabs) });
+}
+
+async function handleSpacesSearch(res: ServerResponse, url: URL) {
+  const tabs = await tabGroupsClient.listTabs();
+  json(res, { spaces: rankSpaces(listSpaces(tabs), url.searchParams.get("q") ?? "") });
+}
+
+async function handleSpacesSearchPost(res: ServerResponse, body: Record<string, unknown>) {
+  const tabs = await tabGroupsClient.listTabs();
+  const query = getString(body, "q") ?? buildSpaceSearchQuery(body);
+  json(res, { spaces: rankSpaces(listSpaces(tabs), query) });
+}
+
+async function handleSpaceMetadata(res: ServerResponse, url: URL) {
+  const idOrUrl = url.searchParams.get("space_id") ?? url.searchParams.get("url");
+  if (!idOrUrl) {
+    errorJson(res, "space_id or url is required", 400);
+    return;
+  }
+
+  const tabs = await tabGroupsClient.listTabs();
+  const space = findSpace(listSpaces(tabs), idOrUrl);
+  if (!space) {
+    errorJson(res, `Space ${idOrUrl} not found`, 404);
+    return;
+  }
+
+  json(res, { space });
+}
+
+async function handleSpaceDispatch(res: ServerResponse, body: Record<string, unknown>) {
+  const spaceId = getString(body, "space_id") ?? getString(body, "space_url");
+  const description = getString(body, "description");
+  if (!spaceId || !description) {
+    errorJson(res, "space_id and description are required", 400);
+    return;
+  }
+
+  const tabs = await tabGroupsClient.listTabs();
+  const space = findSpace(listSpaces(tabs), spaceId);
+  if (!space) {
+    errorJson(res, `Space ${spaceId} not found`, 404);
+    return;
+  }
+
+  const record = buildComputerTaskRecord({
+    description,
+    task_kind: body.task_kind as ComputerTaskKind | undefined,
+    parent_task_id: getString(body, "parent_task_id"),
+    selected_space_id: space.space_id,
+    group_id: getNumber(body, "group_id", "groupId"),
+    task_url: getString(body, "task_url"),
+  });
+
+  hubStateStore.upsertTask({
+    task_id: record.task_id,
+    parent_task_id: record.parent_task_id,
+    surface: "space",
+    task_kind: record.task_kind,
+    group_id: record.group_id,
+    space_id: space.space_id,
+    space_url: space.space_url,
+    description: record.title,
+    template: "space-dispatch",
+    state: "dispatched",
+    result_ref: space.space_url,
+    evidence_url: space.space_url,
+  });
+
+  const state = hubStateStore.appendAudit({
+    operation: "hub.space.dispatch",
+    surface: "space",
+    target_ids: {
+      task_id: record.task_id,
+      parent_task_id: record.parent_task_id,
+      space_id: space.space_id,
+      group_id: record.group_id,
+    },
+    from_state: null,
+    to_state: { task: record, space },
+    evidence_url: space.space_url,
+  });
+
+  json(res, { task: record, space, hub_state: state });
+}
+
 // ---- HTTP Server ----
 
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -581,6 +1092,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 
   const url = new URL(req.url || "/", `http://localhost:${PORT}`);
   const path = url.pathname;
+  const computerTaskMatch = /^\/api\/computer\/tasks\/([^/]+)$/.exec(path);
+  const computerTaskRespondMatch = /^\/api\/computer\/tasks\/([^/]+)\/respond$/.exec(path);
+  const computerArtifactMatch = /^\/api\/computer\/artifacts\/([^/]+)$/.exec(path);
+  const spaceMatch = /^\/api\/spaces\/([^/]+)$/.exec(path);
+  const spaceTaskMatch = /^\/api\/spaces\/([^/]+)\/tasks$/.exec(path);
 
   try {
     if (path === "/dashboard" && req.method === "GET") {
@@ -589,13 +1105,66 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await handleTargets(res);
     } else if (path === "/api/dashboard-data" && req.method === "GET") {
       await handleDashboardData(res);
+    } else if (path === "/api/hub/state" && req.method === "GET") {
+      json(res, hubStateStore.read());
+    } else if (path === "/api/hub/init" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleHubInit(res, body);
+    } else if (path === "/api/hub/group" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleHubGroup(res, body);
+    } else if (path === "/api/hub/task" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleHubTask(res, body);
+    } else if (path === "/api/hub/audit" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleHubAudit(res, body);
+    } else if (path === "/api/computer/tasks" && req.method === "GET") {
+      await handleComputerTasksList(res);
+    } else if (path === "/api/computer/tasks" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleComputerTaskCreate(res, body);
+    } else if (path === "/api/computer/tasks/status" && req.method === "GET") {
+      await handleComputerTaskStatus(res, url);
+    } else if (path === "/api/computer/tasks/artifacts" && req.method === "GET") {
+      await handleComputerTaskArtifacts(res);
+    } else if (computerTaskMatch && req.method === "GET") {
+      const taskId = decodeURIComponent(computerTaskMatch[1]);
+      await handleComputerTaskStatus(res, new URL(`/api/computer/tasks/status?task_id=${encodeURIComponent(taskId)}`, `http://localhost:${PORT}`));
+    } else if (computerTaskRespondMatch && req.method === "POST") {
+      const body = await readBody(req);
+      body.task_id = decodeURIComponent(computerTaskRespondMatch[1]);
+      await handleComputerTaskRespond(res, body);
+    } else if (path === "/api/computer/tasks/respond" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleComputerTaskRespond(res, body);
+    } else if (computerArtifactMatch && req.method === "GET") {
+      await handleComputerArtifactById(res, decodeURIComponent(computerArtifactMatch[1]));
+    } else if (path === "/api/spaces" && req.method === "GET") {
+      await handleSpacesList(res);
+    } else if (path === "/api/spaces/search" && req.method === "GET") {
+      await handleSpacesSearch(res, url);
+    } else if (path === "/api/spaces/search" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleSpacesSearchPost(res, body);
+    } else if (path === "/api/spaces/metadata" && req.method === "GET") {
+      await handleSpaceMetadata(res, url);
+    } else if (spaceMatch && req.method === "GET") {
+      await handleSpaceMetadata(res, new URL(`/api/spaces/metadata?space_id=${encodeURIComponent(decodeURIComponent(spaceMatch[1]))}`, `http://localhost:${PORT}`));
+    } else if (spaceTaskMatch && req.method === "POST") {
+      const body = await readBody(req);
+      body.space_id = decodeURIComponent(spaceTaskMatch[1]);
+      await handleSpaceDispatch(res, body);
+    } else if (path === "/api/spaces/dispatch" && req.method === "POST") {
+      const body = await readBody(req);
+      await handleSpaceDispatch(res, body);
     } else if (path === "/api/health" && req.method === "GET") {
       if (orchestrator) {
         const force = url.searchParams.get("force") === "true";
         const health = await orchestrator.health(force);
-        json(res, health);
+        json(res, decorateHealth(health));
       } else {
-        json(res, { status: "ok", port: PORT, timestamp: new Date().toISOString() });
+        json(res, fallbackHealth());
       }
     } else if (path === "/api/connect" && req.method === "POST") {
       const body = await readBody(req);
@@ -605,8 +1174,9 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await handleAsk(res, body);
     } else if (path === "/api/poll" && req.method === "GET") {
       const taskId = url.searchParams.get("task_id");
-      if (taskId && orchestrator) {
-        const task = orchestrator.getTaskStatus(taskId);
+      if (taskId) {
+        const task = orchestrator?.getTaskStatus(taskId);
+        const result = orchestrator?.getTaskResult(taskId) ?? null;
         if (!task) {
           errorJson(res, `Task ${taskId} not found`, 404);
         } else {
@@ -617,6 +1187,14 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             steps_total: task.steps.length,
             startedAt: task.startedAt,
             completedAt: task.completedAt,
+            steps: task.steps.map((step) => ({
+              toolName: step.toolName,
+              server: step.server,
+              status: step.status,
+              duration_ms: step.duration_ms,
+              result: step.result,
+            })),
+            result,
           });
         }
       } else {
@@ -625,11 +1203,16 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     } else if (path === "/api/stop" && req.method === "POST") {
       const body = await readBody(req);
       const taskId = body.task_id as string | undefined;
-      if (taskId && orchestrator) {
-        const cancelled = orchestrator.cancelTask(taskId);
+      if (taskId) {
+        const cancelled = orchestrator?.cancelTask(taskId) ?? false;
         json(res, { task_id: taskId, cancelled });
       } else {
-        await handleStop(res);
+        try {
+          await handleStop(res);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          json(res, { stopped: false, message });
+        }
       }
     } else if (path === "/api/screenshot" && req.method === "GET") {
       await handleScreenshot(res);
@@ -637,28 +1220,165 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       const body = await readBody(req);
       await handleMode(res, body);
     } else if (path === "/api/delegate" && req.method === "POST") {
-      if (!orchestrator) {
-        errorJson(res, "Orchestrator not initialized", 503);
+      const body = await readBody(req);
+      const description = getString(body, "description");
+      if (!description) {
+        errorJson(res, "description is required", 400);
       } else {
-        const body = await readBody(req);
-        const description = body.description as string;
-        if (!description) {
-          errorJson(res, "description is required", 400);
-        } else {
-          const result = await orchestrator.delegate(description, {
+        const requestedSurface = body.surface === undefined ? null : getSurface(body.surface);
+        if (body.surface !== undefined && !requestedSurface) {
+          errorJson(res, "surface must be one of: computer, space, sidecar, browser, shortwave", 400);
+          return;
+        }
+
+        if (!requestedSurface && !orchestrator) {
+          json(res, legacyDelegateFallback(description));
+          return;
+        }
+
+        if (requestedSurface === "computer" || requestedSurface === "sidecar") {
+          const coordinationSurface = requestedSurface ?? "computer";
+          if (coordinationSurface === "sidecar") {
+            res.setHeader("Deprecation", "true");
+          }
+          const record = buildComputerTaskRecord({
+            description,
+            task_kind: body.task_kind as ComputerTaskKind | undefined,
+            parent_task_id: getString(body, "parent_task_id"),
+            selected_space_id: getString(body, "space_id"),
+            group_id: getNumber(body, "group_id", "groupId"),
+            task_url: getString(body, "task_url"),
+          });
+          hubStateStore.upsertTask({
+            task_id: record.task_id,
+            parent_task_id: record.parent_task_id,
+            surface: coordinationSurface,
+            task_kind: record.task_kind,
+            group_id: record.group_id,
+            space_id: record.selected_space_id,
+            computer_task_url: record.task_url,
+            description: record.title,
+            template: getString(body, "template") ?? "computer-task",
+            state: "dispatched",
+            acceptance_criteria: getStringArray(body, "acceptance_criteria"),
+            artifact_expectations: getStringArray(body, "artifact_expectations"),
+            result_ref: record.task_url,
+            evidence_url: record.task_url,
+          });
+          const state = hubStateStore.appendAudit({
+            operation: "hub.delegate",
+              surface: coordinationSurface,
+            target_ids: {
+              task_id: record.task_id,
+              parent_task_id: record.parent_task_id,
+              group_id: record.group_id,
+              space_id: record.selected_space_id,
+            },
+            from_state: null,
+            to_state: record,
+            evidence_url: record.task_url,
+          });
+          json(res, {
+            task_id: record.task_id,
+            surface: coordinationSurface,
+            state: "dispatched",
+            status: body.async === true ? "pending" : "success",
+            payload: { taskId: record.task_id, task: record },
+            duration_ms: 0,
+            tools_invoked: [],
+            steps_completed: 0,
+            steps_total: 0,
+            computer_task_url: record.task_url,
+            group_id: record.group_id,
+            audit_ids: state.audit.slice(-1).map((entry) => entry.id),
+            migration_hint: coordinationSurface === "sidecar"
+              ? "Use surface=computer for Perplexity Computer workspace delegation."
+              : undefined,
+          }, body.async === true ? 202 : 200);
+          return;
+        }
+
+        const activeOrchestrator = orchestrator;
+        if (!activeOrchestrator) {
+          errorJson(res, "Orchestrator not initialized", 503);
+          return;
+        }
+
+        if (requestedSurface === "space") {
+            const tabs = await tabGroupsClient.listTabs();
+            const space = findSpace(listSpaces(tabs), getString(body, "space_id") ?? getString(body, "space_url") ?? "");
+            if (!space) {
+              errorJson(res, "space_id or space_url must identify an open Space for surface=space", 400);
+              return;
+            }
+            const record = buildComputerTaskRecord({
+              description,
+              task_kind: body.task_kind as ComputerTaskKind | undefined,
+              parent_task_id: getString(body, "parent_task_id"),
+              selected_space_id: space.space_id,
+              group_id: getNumber(body, "group_id", "groupId"),
+              task_url: getString(body, "task_url"),
+            });
+            hubStateStore.upsertTask({
+              task_id: record.task_id,
+              parent_task_id: record.parent_task_id,
+              surface: "space",
+              task_kind: record.task_kind,
+              group_id: record.group_id,
+              space_id: space.space_id,
+              space_url: space.space_url,
+              description: record.title,
+              template: getString(body, "template") ?? "space-dispatch",
+              state: "dispatched",
+              acceptance_criteria: getStringArray(body, "acceptance_criteria"),
+              artifact_expectations: getStringArray(body, "artifact_expectations"),
+              result_ref: space.space_url,
+              evidence_url: space.space_url,
+            });
+            const state = hubStateStore.appendAudit({
+              operation: "hub.delegate",
+              surface: "space",
+              target_ids: {
+                task_id: record.task_id,
+                parent_task_id: record.parent_task_id,
+                group_id: record.group_id,
+                space_id: space.space_id,
+              },
+              from_state: null,
+              to_state: { task: record, space },
+              evidence_url: space.space_url,
+            });
+            json(res, {
+              task_id: record.task_id,
+              surface: "space",
+              state: "dispatched",
+              status: body.async === true ? "pending" : "success",
+              payload: { taskId: record.task_id, task: record, space },
+              duration_ms: 0,
+              tools_invoked: [],
+              steps_completed: 0,
+              steps_total: 0,
+              computer_task_url: record.task_url,
+              space_id: space.space_id,
+              group_id: record.group_id,
+              audit_ids: state.audit.slice(-1).map((entry) => entry.id),
+            }, body.async === true ? 202 : 200);
+            return;
+          }
+
+          const result = await activeOrchestrator.delegate(description, {
             targetTab: body.target_tab as string | undefined,
             timeout_ms: body.timeout_ms as number | undefined,
             async: body.async as boolean | undefined,
             template: body.template as string | undefined,
           });
           json(res, result);
-        }
       }
     } else if (path === "/api/monitor" && req.method === "GET") {
+      const section = url.searchParams.get("section") as "windows" | "tabs" | "all" | null;
       if (!orchestrator) {
-        errorJson(res, "Orchestrator not initialized", 503);
+        json(res, fallbackMonitor(section ?? undefined));
       } else {
-        const section = url.searchParams.get("section") as "windows" | "tabs" | "all" | null;
         const state = await orchestrator.getMonitorState(section ?? undefined);
         json(res, state);
       }
@@ -858,6 +1578,20 @@ server.listen(PORT, () => {
   console.log(`\nEndpoints:`);
   console.log(`  GET  /dashboard            - Live monitoring dashboard`);
   console.log(`  GET  /api/targets          - Raw CDP targets`);
+  console.log(`  GET  /api/hub/state        - Read parent hub state`);
+  console.log(`  POST /api/hub/init         - Initialize parent hub state`);
+  console.log(`  POST /api/hub/group        - Upsert hub tab group state`);
+  console.log(`  POST /api/hub/task         - Upsert hub task state`);
+  console.log(`  POST /api/hub/audit        - Append hub audit row`);
+  console.log(`  GET  /api/computer/tasks  - List Computer task tabs and hub records`);
+  console.log(`  POST /api/computer/tasks  - Register a Computer task coordination record`);
+  console.log(`  GET  /api/computer/tasks/status - Read one Computer task status`);
+  console.log(`  POST /api/computer/tasks/respond - Record a response to a waiting task`);
+  console.log(`  GET  /api/computer/tasks/artifacts - List Computer artifact tabs`);
+  console.log(`  GET  /api/spaces          - List open Spaces`);
+  console.log(`  GET  /api/spaces/search   - Rank open Spaces for a task query`);
+  console.log(`  GET  /api/spaces/metadata - Read one Space metadata record`);
+  console.log(`  POST /api/spaces/dispatch - Register a Space dispatch coordination record`);
   console.log(`  POST /api/connect          - Start Comet & connect`);
   console.log(`  POST /api/ask              - Send prompt {prompt, newChat?, timeout?}`);
   console.log(`  GET  /api/poll             - Check agent status (or ?task_id= for task)`);

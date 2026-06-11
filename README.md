@@ -132,6 +132,7 @@ User: "Something unrecognized"
 - **Extension dormancy auto-recovery**: MV3 service workers that go dormant are automatically woken via CDP before tab group operations
 - **Structured results**: All delegated tasks return typed `TaskResult` objects with status, payload, duration, and tools invoked
 - **Routing fallback**: Unrecognized tasks return enrichment metadata (available templates, tool inventory, server health) so the calling LLM can decompose them
+- **Authentication Workflows**: Standardized login recovery for private platforms via the `browser-auth-workflow` skill
 
 ## Tab Groups
 

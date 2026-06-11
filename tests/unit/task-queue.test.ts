@@ -100,6 +100,27 @@ describe("TaskQueue", () => {
     expect(queue.getTask("t")).toBe(t);
   });
 
+  it("completeActive preserves terminal failure state", () => {
+    const t = makeTask("failed-task");
+    queue.enqueue(t);
+    const active = queue.dequeue("tab-1");
+    expect(active).toBe(t);
+    t.state = "failed";
+    t.completedAt = Date.now();
+    queue.completeActive("tab-1");
+    expect(queue.getTask("failed-task")?.state).toBe("failed");
+    expect(queue.getActiveTask("tab-1")).toBeNull();
+  });
+
+  it("dequeue skips cancelled pending tasks", () => {
+    const cancelled = makeTask("cancelled");
+    const next = makeTask("next");
+    queue.enqueue(cancelled);
+    queue.enqueue(next);
+    expect(queue.cancel("cancelled")).toBe(true);
+    expect(queue.dequeue("tab-1")).toBe(next);
+  });
+
   it("uses __global__ key for non-tab tasks", () => {
     const t = makeTask("global", null);
     queue.enqueue(t);
