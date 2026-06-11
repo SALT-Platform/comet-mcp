@@ -20,6 +20,7 @@
     "http": "node dist/http-server.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:ci": "vitest run tests/unit/ tests/contract/health.test.ts tests/contract/delegate.test.ts tests/contract/monitor.test.ts tests/contract/poll-extended.test.ts tests/contract/stop-extended.test.ts",
     "test:contract": "vitest run tests/contract/",
     "test:unit": "vitest run tests/unit/",
     "test:integration": "vitest run tests/integration/",
