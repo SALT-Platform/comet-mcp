@@ -501,8 +501,31 @@ async function handleAsk(res: ServerResponse, body: Record<string, unknown>) {
 }
 
 async function handlePoll(res: ServerResponse) {
+  if (!cometClient.isConnected) {
+    json(res, {
+      status: "idle",
+      steps: [],
+      currentStep: null,
+      agentBrowsingUrl: null,
+      message: "Comet CDP connection unavailable",
+    });
+    return;
+  }
+
   const result = await (async () => {
-    const status = await cometAI.getAgentStatus();
+    let status: Awaited<ReturnType<typeof cometAI.getAgentStatus>>;
+    try {
+      status = await cometAI.getAgentStatus();
+    } catch (err) {
+      json(res, {
+        status: "idle",
+        steps: [],
+        currentStep: null,
+        agentBrowsingUrl: null,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
 
     if (status.status === "completed" && status.response) {
       return { status: "completed", response: status.response };
@@ -516,10 +539,16 @@ async function handlePoll(res: ServerResponse) {
     };
   })();
 
+  if (!result) return;
   json(res, result);
 }
 
 async function handleStop(res: ServerResponse) {
+  if (!cometClient.isConnected) {
+    json(res, { stopped: false, message: "Comet CDP connection unavailable" });
+    return;
+  }
+
   const result = await (async () => {
     const stopped = await cometAI.stopAgent();
     return { stopped, message: stopped ? "Agent stopped" : "No active agent to stop" };
