@@ -13,7 +13,7 @@ This directory holds the Spequa Spec Plan issue template for `SALT-Platform/come
 
 - **Canonical file:** [`SALT-Platform/salt-platform` `.github/ISSUE_TEMPLATE/spec-plan.md`](https://github.com/SALT-Platform/salt-platform/blob/main/.github/ISSUE_TEMPLATE/spec-plan.md) (v1.1)
 - **sha256 of the canonical file at the last sync:** `34aac3fa766522b2b7bbcac382c095bce5f6aeaf22d55e004980df9abd26b569`
-- **sha256 of this repository's `spec-plan.md` at the last sync:** `cd51c09bdd42c5b5e462cfc13f1015d0a2dc0abc16a9d9619b942eff3cadf9bb`
+- **sha256 of this repository's `spec-plan.md` at the last sync:** `a9522c5d4fc1987d7df50442c68c116320e0f512c6aa882be494ee1f1c7d7589`
 - **Renderer:** `scripts/spec-plan-template/spec_plan_template.py` in `SALT-Platform/salt-platform` renders every copy, the canonical one included, from `scripts/spec-plan-template/spec-plan.tmpl.md` and the repository's own files.
 - **History:** v1.0 from [salt-platform PR #1596](https://github.com/SALT-Platform/salt-platform/pull/1596); v1.1 (Markdown tables, task lists, visible placeholders, fenced `crp_contract`, gap-remediation template, repository gate profile) from [salt-platform PR #2719](https://github.com/SALT-Platform/salt-platform/pull/2719).
 - **Standard:** SPEQUA SDD KIT (SALT-internal Confluence; request access from the accountable owner)
@@ -44,7 +44,7 @@ Run from the repository root (bash, `gh` authenticated):
 ```bash
 # 1. Local copy unchanged since the last sync (hashes the committed file, so local line-ending settings do not matter):
 git show HEAD:.github/ISSUE_TEMPLATE/spec-plan.md | sha256sum
-# expected: cd51c09bdd42c5b5e462cfc13f1015d0a2dc0abc16a9d9619b942eff3cadf9bb
+# expected: a9522c5d4fc1987d7df50442c68c116320e0f512c6aa882be494ee1f1c7d7589
 
 # 2. Canonical file unchanged upstream since the last sync:
 gh api "repos/SALT-Platform/salt-platform/contents/.github/ISSUE_TEMPLATE/spec-plan.md?ref=main" --jq '.content' | base64 -d | sha256sum

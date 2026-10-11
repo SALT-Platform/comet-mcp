@@ -381,7 +381,7 @@ Derived on 2026-10-11 from the files on `main`. The gates below refer to these f
 | Tracked environment files (must hold no real secrets) | none |
 | Deployment configuration | none detected |
 | Runtime pins | Node.js `>=18.0.0` (`package.json` engines) |
-| User interface | none detected |
+| User interface | HTML pages (`dashboard/index.html`) |
 | Default branch | `main` |
 
 ### 19.1 Code & CI
@@ -410,7 +410,7 @@ Derived on 2026-10-11 from the files on `main`. The gates below refer to these f
 - [ ] ⟨conditional: the change alters a JSON schema or stored data shape⟩ Change is backward-compatible or the migration path is documented
 - [ ] ⟨conditional: the change mutates data⟩ Audit log entries emitted for all data-mutating operations
 
-### 19.3 Frontend & UI/UX — ⟨conditional: the change touches a user interface (none detected in §19.0)⟩
+### 19.3 Frontend & UI/UX — ⟨conditional: the change touches the user interface (this repository: HTML pages (`dashboard/index.html`))⟩
 
 - [ ] ⟨conditional: the change touches UI⟩ Shared layout and style patterns reused; no inline styles duplicating the repository's stylesheets
 - [ ] ⟨conditional: the change touches UI⟩ WCAG AA contrast compliance maintained (per the repository's style guide, if it has one)
