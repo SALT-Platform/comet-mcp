@@ -156,6 +156,7 @@ export function listComputerTasks(
 
   for (const task of hubState?.tasks ?? []) {
     const existing = records.get(task.task_id);
+    if (!existing && !isComputerHubTask(task)) continue;
     if (existing) {
       existing.group_id = task.group_id ?? existing.group_id;
       existing.result_ref = task.result_ref ?? existing.result_ref;
@@ -166,6 +167,15 @@ export function listComputerTasks(
   }
 
   return [...records.values()].sort((a, b) => a.title.localeCompare(b.title));
+}
+
+// Hub state also stores Space, browser and Shortwave dispatches. Only Computer
+// and sidecar records (or legacy records with no surface) belong in the
+// Computer inventory, plus any record that carries a Computer task URL.
+function isComputerHubTask(task: HubTaskStateRecord): boolean {
+  const surface = task.surface ?? null;
+  if (surface === null || surface === "computer" || surface === "sidecar") return true;
+  return Boolean(task.computer_task_url) || Boolean(task.result_ref?.includes("/computer/tasks/"));
 }
 
 function fromHubTask(task: HubTaskStateRecord): ComputerTaskRecord {

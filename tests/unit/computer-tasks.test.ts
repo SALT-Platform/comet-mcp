@@ -89,6 +89,44 @@ describe("computer task inventory", () => {
     expect(tasks.find((taskRecord) => taskRecord.task_id === "child-1")?.source).toBe("hub-state");
   });
 
+  it("keeps Space-only dispatches out of the Computer inventory", () => {
+    const base = {
+      group_id: null,
+      template: null,
+      state: "dispatched" as const,
+      result_ref: null,
+      created_at: "2026-05-29T00:00:00.000Z",
+      completed_at: null,
+    };
+    const hubState: HubOrchestratorState = {
+      run_id: "run-2",
+      goal: "Mixed surfaces",
+      parent_window_id: null,
+      hub_tab_id: null,
+      created_at: "2026-05-29T00:00:00.000Z",
+      updated_at: "2026-05-29T00:00:00.000Z",
+      status: "running",
+      groups: [],
+      tasks: [
+        { ...base, task_id: "space-only", surface: "space", space_id: "s-1", description: "Space dispatch" },
+        { ...base, task_id: "computer-1", surface: "computer", description: "Computer dispatch" },
+        { ...base, task_id: "sidecar-1", surface: "sidecar", description: "Sidecar dispatch" },
+        {
+          ...base,
+          task_id: "space-with-computer",
+          surface: "space",
+          computer_task_url: "https://www.perplexity.ai/computer/tasks/11111111-2222-3333-4444-555555555555",
+          description: "Space task delegated to Computer",
+        },
+      ],
+      audit: [],
+    };
+
+    const ids = listComputerTasks([], hubState).map((taskRecord) => taskRecord.task_id).sort();
+
+    expect(ids).toEqual(["computer-1", "sidecar-1", "space-with-computer"]);
+  });
+
   it("builds queued records for new coordination tasks", () => {
     const record = buildComputerTaskRecord({
       description: "Validate child output",
