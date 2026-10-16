@@ -20,10 +20,27 @@ COMET_HTTP_PORT=8080 npm run http
 All responses are JSON. All endpoints support CORS (`Access-Control-Allow-Origin: *`).
 
 ### Health Check
-```
+```http
 GET /api/health
--> { "status": "ok", "port": 3456, "timestamp": "..." }
+-> {
+  "overall": "healthy" | "degraded" | "down",
+  "ok": true,
+  "components": {
+    "browser": { "name": "browser", "status": "healthy" | "unreachable" | "degraded" | "unknown", "reason": null, "latency_ms": 0 },
+    "comet-mcp": { "name": "comet-mcp", "status": "healthy", "reason": null, "latency_ms": 0 },
+    "comet-monitor": { "name": "comet-monitor", "status": "healthy" | "unreachable" | "degraded" | "unknown", "reason": null, "latency_ms": 0 },
+    "extension": { "name": "extension", "status": "healthy" | "unreachable" | "degraded" | "unknown", "reason": null, "latency_ms": 0 },
+    "browser_cdp": { "status": "healthy" | "unreachable" | "degraded" | "unknown", "port": 9222, "detail": null },
+    "comet_mcp": { "status": "healthy", "port": 3456, "build": "local" },
+    "comet_monitor": { "status": "healthy" | "unreachable" | "degraded" | "unknown", "port": 5555, "detail": null }
+  },
+  "checkedAt": 1781132011678,
+  "duration_ms": 0,
+  "timestamp": "..."
+}
 ```
+
+The health endpoint returns this contract-shaped envelope before orchestrator initialization as well. `ok` remains true when the HTTP bridge itself is available and non-core monitoring surfaces are unavailable.
 
 ### Connect to Comet
 ```
@@ -51,6 +68,63 @@ GET /api/poll
 POST /api/stop
 -> { "stopped": true, "message": "Agent stopped" }
 ```
+
+## Hub Orchestration Endpoints
+
+These endpoints support the Computer/Spaces parent hub workflow used by Codex, Comet sidecar assistants, and browser-control agents.
+
+### Delegate Work
+```http
+POST /api/delegate
+Body: {
+  "description": "contract validator computer delegation",
+  "surface": "computer",
+  "task_kind": "validation",
+  "async": true
+}
+-> {
+  "task_id": "computer-task-...",
+  "surface": "computer",
+  "state": "dispatched",
+  "status": "pending",
+  "payload": { "taskId": "computer-task-...", "task": { "...": "..." } },
+  "duration_ms": 0,
+  "tools_invoked": [],
+  "steps_completed": 0,
+  "steps_total": 0,
+  "computer_task_url": "https://www.perplexity.ai/computer/tasks/...",
+  "audit_ids": ["audit-..."]
+}
+```
+
+Supported `surface` values are `computer`, `space`, `sidecar`, `browser`, and `shortwave`. Unknown values return HTTP `400`. `surface=sidecar` is compatibility-only and returns `Deprecation: true` plus a migration hint to use `surface=computer`. When the orchestrator is not initialized and no surface is supplied, delegation falls back to a Computer coordination task.
+
+### Computer Tasks
+```http
+GET /api/computer/tasks
+POST /api/computer/tasks
+GET /api/computer/tasks/status?task_id=<id>
+POST /api/computer/tasks/respond
+GET /api/computer/tasks/artifacts
+GET /api/computer/tasks/:id
+POST /api/computer/tasks/:id/respond
+GET /api/computer/artifacts/:id
+```
+
+Computer task creation accepts `description`, `title`, or `instructions` and records hub state plus audit metadata.
+
+### Spaces
+```http
+GET /api/spaces
+GET /api/spaces/search?q=<query>
+POST /api/spaces/search
+GET /api/spaces/metadata?space_id=<id>
+POST /api/spaces/dispatch
+GET /api/spaces/:id
+POST /api/spaces/:id/tasks
+```
+
+Space search ranks open Comet Space tabs by task terms, inferred skills, Space title, and URL. Space dispatch records the selected Space, task URL, group metadata, and audit IDs.
 
 ### Screenshot
 ```

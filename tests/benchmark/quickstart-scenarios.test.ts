@@ -37,16 +37,25 @@ describe("Scenario 1: Unified Health Check (Happy Path)", () => {
     expect(["healthy", "degraded", "down"]).toContain(body.overall);
   });
 
-  it("contains exactly 4 components: browser, comet-mcp, comet-monitor, extension", async () => {
+  it("contains canonical components and compatibility aliases", async () => {
     const { body } = await get("/api/health");
-    expect(Object.keys(body.components).sort()).toEqual([
-      "browser", "comet-mcp", "comet-monitor", "extension",
-    ]);
+    expect(body.components).toHaveProperty("browser");
+    expect(body.components).toHaveProperty("comet-mcp");
+    expect(body.components).toHaveProperty("comet-monitor");
+    expect(body.components).toHaveProperty("extension");
+    expect(body.components).toHaveProperty("browser_cdp");
+    expect(body.components).toHaveProperty("comet_mcp");
+    expect(body.components).toHaveProperty("comet_monitor");
   });
 
-  it("each component has status, reason, and latency_ms", async () => {
+  it("each canonical component has status, reason, and latency_ms", async () => {
     const { body } = await get("/api/health");
-    for (const comp of Object.values(body.components) as any[]) {
+    for (const comp of [
+      body.components.browser,
+      body.components["comet-mcp"],
+      body.components["comet-monitor"],
+      body.components.extension,
+    ] as any[]) {
       expect(comp).toHaveProperty("status");
       expect(comp).toHaveProperty("reason");
       expect(comp).toHaveProperty("latency_ms");

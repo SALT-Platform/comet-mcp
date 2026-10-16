@@ -16,10 +16,12 @@ interface ComponentHealth {
 }
 
 interface HealthOutput {
+  ok?: boolean;
   overall: "healthy" | "degraded" | "down";
-  components: Record<string, ComponentHealth>;
+  components: Record<string, ComponentHealth | Record<string, unknown>>;
   checkedAt: number;
   duration_ms: number;
+  timestamp?: string;
 }
 
 async function callHealthTool(input: HealthInput): Promise<HealthOutput> {
@@ -37,14 +39,17 @@ describe("comet_health contract", () => {
       expect(["healthy", "degraded", "down"]).toContain(output.overall);
     });
 
-    it("components must contain exactly 4 entries: browser, comet-mcp, comet-monitor, extension", async () => {
+    it("components must contain canonical entries and Spec 193 compatibility aliases", async () => {
       const output = await callHealthTool({});
-      expect(Object.keys(output.components).sort()).toEqual([
-        "browser",
-        "comet-mcp",
-        "comet-monitor",
-        "extension",
-      ]);
+      expect(output.components).toHaveProperty("browser");
+      expect(output.components).toHaveProperty("comet-mcp");
+      expect(output.components).toHaveProperty("comet-monitor");
+      expect(output.components).toHaveProperty("extension");
+      expect(output.components).toHaveProperty("browser_cdp");
+      expect(output.components).toHaveProperty("comet_mcp");
+      expect(output.components).toHaveProperty("comet_monitor");
+      expect(typeof output.ok).toBe("boolean");
+      expect(typeof output.timestamp).toBe("string");
     });
 
     it("each component must have status (HealthLevel), reason (string|null), latency_ms (number|null)", async () => {
@@ -55,7 +60,12 @@ describe("comet_health contract", () => {
         "degraded",
         "unknown",
       ];
-      for (const comp of Object.values(output.components)) {
+      for (const comp of [
+        output.components.browser,
+        output.components["comet-mcp"],
+        output.components["comet-monitor"],
+        output.components.extension,
+      ] as ComponentHealth[]) {
         expect(healthLevels).toContain(comp.status);
         expect(
           typeof comp.reason === "string" || comp.reason === null

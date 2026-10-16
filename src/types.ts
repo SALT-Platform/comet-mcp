@@ -125,7 +125,7 @@ export interface TaskDelegation {
 }
 
 export interface TaskResult {
-  status: "success" | "failure" | "partial" | "cancelled";
+  status: "pending" | "success" | "failure" | "partial" | "cancelled";
   payload: unknown;
   duration_ms: number;
   tools_invoked: string[];
@@ -256,4 +256,137 @@ export interface TabInfo {
   title: string;
   url: string;
   active: boolean;
+}
+
+// ---- Parent Hub Orchestration State ----
+
+export type HubStatus =
+  | "initializing"
+  | "planning"
+  | "active"
+  | "running"
+  | "collecting"
+  | "closing"
+  | "closed"
+  | "blocked"
+  | "completed"
+  | "archived";
+export type HubGroupRole =
+  | "hub"
+  | "epic"
+  | "story"
+  | "spec"
+  | "task"
+  | "validation"
+  | "computer-hub"
+  | "space-orchestrator"
+  | "research"
+  | "browser-control"
+  | "computer-task"
+  | "custom";
+export type HubTaskState =
+  | TaskState
+  | "queued"
+  | "dispatched"
+  | "waiting_response"
+  | "reported";
+export type HubSurface = "computer" | "space" | "sidecar" | "browser" | "shortwave";
+
+export interface HubAuditEntry {
+  id: string;
+  audit_id?: string;
+  operation: string;
+  surface?: HubSurface | null;
+  target_ids: Record<string, string | number | null>;
+  targets?: Record<string, string | number | null>;
+  from_state: unknown;
+  to_state: unknown;
+  evidence_url: string | null;
+  artifact_path: string | null;
+  actor?: string;
+  timestamp: string;
+}
+
+export interface HubGroupState {
+  group_id: number;
+  window_id: number;
+  title: string;
+  role: HubGroupRole;
+  space_url: string | null;
+  space_id?: string | null;
+  tab_ids: number[];
+  task_ids: string[];
+  status: HubStatus;
+  created_at?: string;
+}
+
+export interface HubTaskStateRecord {
+  task_id: string;
+  parent_task_id?: string | null;
+  surface?: HubSurface | null;
+  task_kind?: string | null;
+  group_id: number | null;
+  space_id?: string | null;
+  space_url?: string | null;
+  computer_task_url?: string | null;
+  description: string;
+  template: string | null;
+  state: HubTaskState;
+  acceptance_criteria?: string[];
+  artifact_expectations?: string[];
+  result_ref: string | null;
+  created_at: string;
+  updated_at?: string;
+  completed_at: string | null;
+}
+
+export interface HubSpaceRecord {
+  space_id: string;
+  space_url: string;
+  name: string;
+  description?: string | null;
+  instructions?: string | null;
+  skills: string[];
+  files: string[];
+  links: string[];
+  domains?: string[];
+  last_used_at?: string | null;
+  success_count?: number;
+}
+
+export interface HubArtifactRecord {
+  artifact_id: string;
+  task_id: string | null;
+  group_id?: number | null;
+  url: string;
+  title: string;
+  kind?: string | null;
+  produced_at?: string | null;
+  validated?: boolean;
+}
+
+export interface HubWaitingItem {
+  task_id: string;
+  prompt: string;
+  detected_at: string;
+  resolved_at: string | null;
+  response: string | null;
+}
+
+export interface HubOrchestratorState {
+  schema_version: 1;
+  run_id: string;
+  goal: string;
+  parent_window_id: number | null;
+  hub_tab_id: number | string | null;
+  parent_computer_task_url: string | null;
+  created_at: string;
+  updated_at: string;
+  status: HubStatus;
+  groups: HubGroupState[];
+  spaces: HubSpaceRecord[];
+  tasks: HubTaskStateRecord[];
+  artifacts: HubArtifactRecord[];
+  waiting_items: HubWaitingItem[];
+  audit: HubAuditEntry[];
 }
